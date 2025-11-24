@@ -1,5 +1,19 @@
+# --- SECRETS (Existing) ---
+*.pem
+.env
+config.toml
+secrets.toml
+
+# --- PYTHON JUNK (Existing) ---
+__pycache__/
+*.pyc
+venv/
+.DS_Store
+
+# --- TERRAFORM (ADD THIS!) ---
 .terraform/
 *.tfstate
-*.tfstate.backup
-__pycache__/
-.DS_Store
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
