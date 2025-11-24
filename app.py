@@ -9,8 +9,16 @@ BUCKET_NAME = "crypto-lake-taras-2025-november" # <--- YOUR BUCKET NAME
 st.set_page_config(page_title="Crypto Volatility Monitor", layout="wide")
 
 # --- AUTHENTICATION ---
-# On your laptop, this uses your local aws configure keys automatically.
-s3 = boto3.client('s3')
+# Check if we are in the Cloud (Streamlit Secrets exist) or on Laptop
+if "aws" in st.secrets:
+    # We are on Streamlit Cloud -> Use the secrets you pasted
+    s3 = boto3.client('s3',
+                      aws_access_key_id=st.secrets["aws"]["aws_access_key_id"],
+                      aws_secret_access_key=st.secrets["aws"]["aws_secret_access_key"],
+                      region_name=st.secrets["aws"]["aws_default_region"])
+else:
+    # We are on Laptop -> Use local ~/.aws/credentials automatically
+    s3 = boto3.client('s3')
 
 @st.cache_data(ttl=60) # Cache data for 60 seconds to save S3 costs/speed
 def load_data():
