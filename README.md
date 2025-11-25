@@ -63,7 +63,7 @@ meme-index/
 │   └── requirements.txt
 ├── main.tf              # Terraform Infrastructure (AWS)
 └── ...
-
+ ```
 ---
 
 ## 🔧 How to Run Locally
