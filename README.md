@@ -63,6 +63,7 @@ meme-index/
 │   └── requirements.txt
 ├── main.tf              # Terraform Infrastructure (AWS)
 └── ...
+```bash
 
 ---
 
