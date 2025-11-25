@@ -1,0 +1,7 @@
+# --For app.py--
+streamlit
+plotly
+pandas
+boto3
+pyarrow
+fastparquet
