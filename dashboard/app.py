@@ -7,7 +7,7 @@ from io import BytesIO
 import datetime
 
 # --- CONFIG ---
-BUCKET_NAME = "crypto-lake-taras-2025-november" # <--- YOUR BUCKET
+BUCKET_NAME = "crypto-lake-taras-2025-november"
 st.set_page_config(page_title="Crypto Volatility Monitor", layout="wide")
 
 # --- AUTHENTICATION ---
@@ -20,14 +20,14 @@ else:
     s3 = boto3.client('s3')
 
 @st.cache_data(ttl=60)
-def load_data():
+def load_data(hours_to_load):
+    """Fetches data based on the user's selected time window."""
     today = datetime.datetime.now()
-    yesterday = today - datetime.timedelta(days=1)
-    
-    prefixes = [
-        f"btc_trades_{today.strftime('%Y%m%d')}",
-        f"btc_trades_{yesterday.strftime('%Y%m%d')}"
-    ]
+    # If user wants 24h, we might need yesterday's file too
+    prefixes = [f"btc_trades_{today.strftime('%Y%m%d')}"]
+    if hours_to_load > 12:
+        yesterday = today - datetime.timedelta(days=1)
+        prefixes.append(f"btc_trades_{yesterday.strftime('%Y%m%d')}")
     
     all_files = []
     paginator = s3.get_paginator('list_objects_v2')
@@ -40,8 +40,10 @@ def load_data():
     if not all_files:
         return pd.DataFrame()
 
-    # Load last 250 files to ensure we cover the time window
-    recent_files = sorted(all_files, key=lambda x: x['LastModified'], reverse=True)[:250]
+    # Sort and take recent files based on window size (heuristic)
+    # 4h ~ 240 files | 24h ~ 1440 files
+    limit = 300 if hours_to_load <= 4 else 1500
+    recent_files = sorted(all_files, key=lambda x: x['LastModified'], reverse=True)[:limit]
     
     data_frames = []
     for file in recent_files:
@@ -58,29 +60,51 @@ def load_data():
     final_df = pd.concat(data_frames)
     final_df['time'] = pd.to_datetime(final_df['time'])
     
-    # --- FINAL OPTIMIZATION: TIME FILTER ---
-    # Only keep the last 4 hours. Everything else is history.
-    cutoff_time = pd.Timestamp.now() - pd.Timedelta(hours=4)
+    # Filter by selected hours
+    cutoff_time = pd.Timestamp.now() - pd.Timedelta(hours=hours_to_load)
     final_df = final_df[final_df['time'] > cutoff_time]
     
     final_df = final_df.sort_values(by='time')
     return final_df
 
-# --- UI ---
-st.title("🐋 Real-Time Whale Tracker")
-st.markdown("Monitoring BTC/USDT Volatility • **Last 4 Hours Window**")
+# --- SIDEBAR CONTROLS ---
+st.sidebar.title("🎛️ Control Panel")
 
-if st.button("Refresh Data"):
+# 1. Time Slider
+time_window = st.sidebar.selectbox(
+    "Time Window",
+    options=[1, 4, 12, 24],
+    index=1, # Default to 4 hours
+    format_func=lambda x: f"Last {x} Hours"
+)
+
+# 2. Bubble Threshold (The "More Dots" Slider)
+# Default is 0.1 (Sensitive) so you see lots of bubbles like before
+whale_threshold = st.sidebar.slider(
+    "Whale Threshold (BTC)",
+    min_value=0.05,
+    max_value=2.0,
+    value=0.1, 
+    step=0.05,
+    help="Lower this number to see smaller trades (more bubbles)."
+)
+
+# --- MAIN APP ---
+st.title("🐋 Real-Time Whale Tracker")
+st.markdown(f"Monitoring BTC/USDT • **Last {time_window} Hours**")
+
+if st.sidebar.button("🔴 Refresh Data"):
     st.cache_data.clear()
 
-df = load_data()
+# Load data based on sidebar choice
+df = load_data(time_window)
 
 if not df.empty:
     col1, col2, col3 = st.columns(3)
-    col1.metric("Recent Trades", f"{len(df):,}")
+    col1.metric("Trades Loaded", f"{len(df):,}")
     col2.metric("Bitcoin Price", f"${df['price'].iloc[-1]:,.2f}")
     
-    # 1. CANDLESTICK CHART (Resampled)
+    # --- CHART 1: CANDLES (Resampled) ---
     df_resampled = df.set_index('time').resample('1min').agg({
         'price': ['first', 'max', 'min', 'last'],
         'quantity': 'sum'
@@ -88,7 +112,7 @@ if not df.empty:
     df_resampled.columns = ['open', 'high', 'low', 'close', 'volume']
     df_resampled = df_resampled.dropna()
 
-    st.subheader("Price Action (1-Min Candles)")
+    st.subheader("Price Action")
     fig_price = go.Figure(data=[go.Candlestick(
         x=df_resampled.index,
         open=df_resampled['open'], high=df_resampled['high'],
@@ -97,19 +121,21 @@ if not df.empty:
     fig_price.update_layout(xaxis_rangeslider_visible=False, height=500)
     st.plotly_chart(fig_price, width='stretch')
 
-    # 2. WHALE BUBBLES (> 0.5 BTC)
-    st.subheader("Whale Volume Detection (> 0.5 BTC)")
-    whales = df[df['quantity'] > 0.5]
+    # --- CHART 2: WHALES (Interactive Threshold) ---
+    st.subheader(f"Whale Volume (> {whale_threshold} BTC)")
+    
+    # Filter using the SIDEBAR value
+    whales = df[df['quantity'] > whale_threshold]
     
     if not whales.empty:
         fig_vol = px.scatter(
             whales, x='time', y='price', size='quantity', 
             color='quantity', color_continuous_scale='RdBu_r',
-            title="Institutional Liquidity Events"
+            title=f"Detected {len(whales)} Large Trades"
         )
         st.plotly_chart(fig_vol, use_container_width=True)
     else:
-        st.info("Quiet market. No large whales in the last 4 hours.")
+        st.info(f"No trades larger than {whale_threshold} BTC found.")
 
 else:
-    st.warning("No recent data found. Bot might be sleeping.")
+    st.warning("No recent data found.")
