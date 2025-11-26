@@ -1,112 +1,169 @@
+# 1. THE SETUP BLOCK
+# This tells Terraform: "We are using AWS."
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 4.16"
+    }
+  }
+  required_version = ">= 1.2.0"
+}
+
+# 2. THE LOGIN BLOCK
+# This tells Terraform: "Use my credentials and go to Frankfurt."
 provider "aws" {
-  region = "eu-central-1"
+  region  = "eu-central-1"
 }
 
-# 1. Create the Repo (If you haven't already)
-resource "aws_ecr_repository" "meme_repo" {
-  name = "meme-index"
+# 3. THE RESOURCE BLOCK (The thing we are building)
+# This creates a Storage Bucket (S3) to hold our financial data.
+resource "aws_s3_bucket" "finance_data" {
+  # CHANGE THIS NAME BELOW TO SOMETHING UNIQUE
+  bucket = "crypto-lake-taras-2025-november" 
+
+  tags = {
+    Name        = "My Crypto Data Lake"
+    Environment = "Dev"
+  }
+}
+# ---------------------------------------------------------
+# 1. THE FIREWALL (Security Group)
+# This allows traffic on Port 22 (SSH) so you can log in.
+# ---------------------------------------------------------
+resource "aws_security_group" "crypto_firewall" {
+  name        = "crypto-allow-ssh"
+  description = "Allow SSH inbound traffic"
+
+  ingress {
+    description = "SSH from anywhere"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # WARNING: This allows access from ANY IP. For dev only.
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 }
 
-# 2. The Role (Let Lambda Run)
-resource "aws_iam_role" "lambda_role" {
-  name = "meme_index_role"
+# ---------------------------------------------------------
+# 2. THE OS FINDER (Data Source)
+# This automatically finds the latest Ubuntu 20.04 ID in Frankfurt.
+# ---------------------------------------------------------
+data "aws_ami" "ubuntu" {
+  most_recent = true
 
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+
+  owners = ["099720109477"] # Canonical (The makers of Ubuntu)
+}
+# ---------------------------------------------------------
+# IAM ROLE: The "Identity" for the Server
+# ---------------------------------------------------------
+resource "aws_iam_role" "crypto_role" {
+  name = "crypto_bot_role_v1"
+
+  # The "Trust Policy" -> Who is allowed to wear this badge? (EC2)
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
-      Principal = { Service = "lambda.amazonaws.com" }
-    }]
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
   })
 }
-resource "aws_iam_role_policy" "lambda_dynamo_access" {
-  name = "lambda_dynamo_policy"
-  role = aws_iam_role.lambda_role.id
+
+# ---------------------------------------------------------
+# IAM POLICY: The "Permissions" (Access to S3)
+# ---------------------------------------------------------
+resource "aws_iam_role_policy" "crypto_s3_access" {
+  name = "allow_s3_write"
+  role = aws_iam_role.crypto_role.id
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
+        Effect = "Allow"
+        # Allow listing buckets and putting files
         Action = [
-          "dynamodb:PutItem",
-          "dynamodb:Query",
-          "dynamodb:Scan"
+          "s3:PutObject",
+          "s3:ListBucket"
         ]
-        Effect   = "Allow"
-        Resource = aws_dynamodb_table.meme_history.arn
+        # Grant access ONLY to your specific bucket
+        Resource = [
+          aws_s3_bucket.finance_data.arn,
+          "${aws_s3_bucket.finance_data.arn}/*"
+        ]
       }
     ]
   })
 }
-# Attach basic logging permissions
-resource "aws_iam_role_policy_attachment" "lambda_logs" {
-  role       = aws_iam_role.lambda_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+# ---------------------------------------------------------
+# NEW: Allow the server to download Docker images (ECR Read Only)
+# ---------------------------------------------------------
+resource "aws_iam_role_policy_attachment" "ecr_read_only" {
+  role       = aws_iam_role.crypto_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+}
+# ---------------------------------------------------------
+# INSTANCE PROFILE: The "Connector" to EC2
+# ---------------------------------------------------------
+resource "aws_iam_instance_profile" "crypto_profile" {
+  name = "crypto_bot_profile_v1"
+  role = aws_iam_role.crypto_role.name
 }
 
-# 3. The Function (Points to your Docker Image)
-resource "aws_lambda_function" "meme_index" {
-  function_name = "meme-index-api"
-  package_type  = "Image"
-  image_uri     = "555272931561.dkr.ecr.eu-central-1.amazonaws.com/meme-index:latest"
-  role          = aws_iam_role.lambda_role.arn
-  architectures = ["x86_64"]
+# ---------------------------------------------------------
+# 3. THE SERVER (EC2 Instance)
+# ---------------------------------------------------------
+resource "aws_instance" "crypto_server" {
+  ami           = data.aws_ami.ubuntu.id
+  instance_type = "t3.micro"
+  key_name      = "my-aws-key"
+  
+  vpc_security_group_ids = [aws_security_group.crypto_firewall.id]
+  iam_instance_profile = aws_iam_instance_profile.crypto_profile.name
 
-  environment {
-    variables = {
-      COIN_ID = "pepe"
-      TABLE_NAME = aws_dynamodb_table.meme_history.name
-    }
-  }
-}
-
-# 4. The Public URL (The "Product")
-resource "aws_lambda_function_url" "public_api" {
-  function_name      = aws_lambda_function.meme_index.function_name
-  authorization_type = "NONE"
-}
-
-# Output the URL so you can sell it
-output "api_url" {
-  value = aws_lambda_function_url.public_api.function_url
-}
-
-resource "aws_dynamodb_table" "meme_history" {
-  name           = "meme-coin-history"
-  billing_mode   = "PAY_PER_REQUEST" # Free tier friendly
-  hash_key       = "coin"       # Partition Key (e.g., "pepe")
-  range_key      = "timestamp"  # Sort Key (e.g., "2025-11-22T...")
-
-  attribute {
-    name = "coin"
-    type = "S"
+  tags = {
+    Name = "Terraform-Automated-Server"
   }
 
-  attribute {
-    name = "timestamp"
-    type = "S"
-  }
-}
-# 1. The Clock (Run every 1 hour)
-resource "aws_cloudwatch_event_rule" "every_hour" {
-  name                = "meme-index-hourly-trigger"
-  description         = "Triggers the Meme Index lambda every hour"
-  schedule_expression = "rate(1 hour)"
-}
-
-# 2. The Target (Point the clock at the Lambda)
-resource "aws_cloudwatch_event_target" "trigger_lambda" {
-  rule      = aws_cloudwatch_event_rule.every_hour.name
-  target_id = "meme_index_target"
-  arn       = aws_lambda_function.meme_index.arn
-}
-
-# 3. The Permission (Let the clock invoke the function)
-resource "aws_lambda_permission" "allow_cloudwatch" {
-  statement_id  = "AllowExecutionFromCloudWatch"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.meme_index.function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.every_hour.arn
+  # ---------------------------------------------------------
+  # THE MAGIC SCRIPT (User Data)
+  # This runs as "root" instantly when the server turns on.
+  # ---------------------------------------------------------
+  user_data = <<-EOF
+              #!/bin/bash
+              # 1. Update the OS
+              apt-get update -y
+              
+              # 2. Install Docker and AWS CLI
+              apt-get install -y docker.io awscli
+              
+              # 3. Start Docker
+              systemctl start docker
+              systemctl enable docker
+              
+              # 4. Add the 'ubuntu' user to the Docker group
+              usermod -aG docker ubuntu
+              EOF
 }
